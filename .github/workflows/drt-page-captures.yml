@@ -1,0 +1,38 @@
+name: Temporary DrT page captures
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Capture exact Dr. T product pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p captures
+          base='https://pageshot.site/v1/screenshot'
+          common='width=1440&height=1200&format=png&hide_banners=true&block_ads=true&delay=5000&timeout=60000&wait_until=networkidle'
+          curl -fL --retry 2 --retry-delay 3 "$base?url=https%3A%2F%2Fdrtforlife.com%2Fh2-breath-device%2F&$common" -o captures/h2-breath-hero.png
+          curl -fL --retry 2 --retry-delay 3 "$base?url=https%3A%2F%2Fdrtforlife.com%2Fh2-breath-device%2F&full_page=true&$common" -o captures/h2-breath-full.png
+          curl -fL --retry 2 --retry-delay 3 "$base?url=https%3A%2F%2Fdrtforlife.com%2Fproduct%2Fh2-shower%2F&full_page=true&$common" -o captures/h2-shower-full.png
+          curl -fL --retry 2 --retry-delay 3 "$base?url=https%3A%2F%2Fdrtforlife.com%2Fproduct%2Fh2-spa%2F&full_page=true&$common" -o captures/h2-spa-full.png
+          curl -fL --retry 2 --retry-delay 3 "$base?url=https%3A%2F%2Fdrtforlife.com%2Fproduct%2Fled-light-phototherapy-bed%2F&full_page=true&$common" -o captures/light-tube-full.png
+          curl -fL --retry 2 --retry-delay 3 "$base?url=https%3A%2F%2Fdrtforlife.com%2Fproduct%2Fo%25e2%2582%2582-lounge%2F&full_page=true&$common" -o captures/o2-lounge-full.png
+          curl -fL --retry 2 --retry-delay 3 "$base?url=https%3A%2F%2Fdrtforlife.com%2Fproduct%2Fthe-halo%2F&full_page=true&$common" -o captures/halo-full.png
+          file captures/*
+          sha256sum captures/* > captures/SHA256SUMS.txt
+      - name: Upload captures
+        uses: actions/upload-artifact@v4
+        with:
+          name: drt-page-captures
+          path: captures
+          if-no-files-found: error
+          retention-days: 1
