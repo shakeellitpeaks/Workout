@@ -11,8 +11,106 @@ permissions:
 jobs:
   capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
+      - name: Install extraction dependencies
+        run: python -m pip install --quiet requests beautifulsoup4 lxml pillow
+
+      - name: Download exact pages and their original image assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p page-assets
+          cat > /tmp/extract_drt.py <<'PY'
+          import hashlib, json, mimetypes, os, re, sys
+          from pathlib import Path
+          from urllib.parse import urljoin, urlparse
+          import requests
+          from bs4 import BeautifulSoup
+
+          pages = {
+              'h2-breath': 'https://drtforlife.com/h2-breath-device/',
+              'h2-shower': 'https://drtforlife.com/product/h2-shower/',
+              'h2-spa': 'https://drtforlife.com/product/h2-spa/',
+              'light-tube': 'https://drtforlife.com/product/led-light-phototherapy-bed/',
+              'o2-lounge': 'https://drtforlife.com/product/o%E2%82%82-lounge/',
+              'halo': 'https://drtforlife.com/product/the-halo/',
+          }
+          root = Path('page-assets')
+          sess = requests.Session()
+          sess.headers.update({
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+              'Accept-Language': 'en-US,en;q=0.9',
+          })
+          manifest = {'pages': {}}
+
+          def candidates_from_srcset(value):
+              out=[]
+              for item in (value or '').split(','):
+                  u=item.strip().split(' ')[0]
+                  if u: out.append(u)
+              return out
+
+          def clean_name(url, idx, content_type=''):
+              p=urlparse(url).path
+              base=os.path.basename(p).split('?')[0] or f'image-{idx}'
+              base=re.sub(r'[^A-Za-z0-9._-]+','-',base)[:120]
+              ext=Path(base).suffix.lower()
+              if ext not in {'.jpg','.jpeg','.png','.webp','.gif','.avif','.svg'}:
+                  guess=mimetypes.guess_extension(content_type.split(';')[0].strip()) if content_type else None
+                  base += guess or '.bin'
+              return f'{idx:03d}-{base}'
+
+          for slug, url in pages.items():
+              pdir=root/slug
+              idir=pdir/'images'
+              idir.mkdir(parents=True, exist_ok=True)
+              r=sess.get(url, timeout=60, allow_redirects=True)
+              print(slug, r.status_code, r.url, r.headers.get('content-type'), len(r.content))
+              r.raise_for_status()
+              (pdir/'page.html').write_bytes(r.content)
+              soup=BeautifulSoup(r.text, 'lxml')
+              title=soup.title.get_text(' ',strip=True) if soup.title else ''
+              text='\n'.join(line.strip() for line in soup.get_text('\n').splitlines() if line.strip())
+              (pdir/'page.txt').write_text(text, encoding='utf-8')
+              image_urls=[]
+              def add(u):
+                  if not u: return
+                  u=urljoin(r.url,u.strip())
+                  if u.startswith('data:'): return
+                  if u not in image_urls: image_urls.append(u)
+              for meta in soup.select('meta[property="og:image"],meta[name="twitter:image"],meta[itemprop="image"]'):
+                  add(meta.get('content'))
+              for img in soup.find_all('img'):
+                  for attr in ['src','data-src','data-lazy-src','data-original','data-large_image','data-thumb']:
+                      add(img.get(attr))
+                  for attr in ['srcset','data-srcset']:
+                      for u in candidates_from_srcset(img.get(attr)): add(u)
+              for source in soup.find_all('source'):
+                  for attr in ['src','data-src']:
+                      add(source.get(attr))
+                  for attr in ['srcset','data-srcset']:
+                      for u in candidates_from_srcset(source.get(attr)): add(u)
+              downloaded=[]
+              for idx, iurl in enumerate(image_urls,1):
+                  try:
+                      ir=sess.get(iurl, timeout=60, allow_redirects=True)
+                      ct=ir.headers.get('content-type','')
+                      if ir.status_code != 200 or not (ct.startswith('image/') or re.search(r'\.(jpe?g|png|webp|gif|avif|svg)(\?|$)', ir.url, re.I)):
+                          continue
+                      fname=clean_name(ir.url,idx,ct)
+                      out=idir/fname
+                      out.write_bytes(ir.content)
+                      downloaded.append({'source_url':iurl,'resolved_url':ir.url,'file':str(out),'content_type':ct,'bytes':len(ir.content),'sha256':hashlib.sha256(ir.content).hexdigest()})
+                  except Exception as e:
+                      print('image error',slug,iurl,repr(e),file=sys.stderr)
+              headings=[h.get_text(' ',strip=True) for h in soup.find_all(['h1','h2','h3'])]
+              manifest['pages'][slug]={'requested_url':url,'resolved_url':r.url,'status':r.status_code,'title':title,'headings':headings,'image_candidates':image_urls,'downloaded_images':downloaded}
+          (root/'manifest.json').write_text(json.dumps(manifest,indent=2,ensure_ascii=False),encoding='utf-8')
+          PY
+          python /tmp/extract_drt.py
+          find page-assets -type f -maxdepth 4 -printf '%p %s bytes\n' | sort
+
       - name: Capture exact Dr. T product pages
         shell: bash
         run: |
@@ -29,10 +127,13 @@ jobs:
           curl -fL --retry 2 --retry-delay 3 "$base?url=https%3A%2F%2Fdrtforlife.com%2Fproduct%2Fthe-halo%2F&full_page=true&$common" -o captures/halo-full.png
           file captures/*
           sha256sum captures/* > captures/SHA256SUMS.txt
-      - name: Upload captures
+
+      - name: Upload exact page assets
         uses: actions/upload-artifact@v4
         with:
-          name: drt-page-captures
-          path: captures
+          name: drt-exact-page-assets
+          path: |
+            page-assets
+            captures
           if-no-files-found: error
           retention-days: 1
